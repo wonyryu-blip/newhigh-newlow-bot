@@ -119,6 +119,7 @@ def get_kospi_tickers():
     pure = df[
         (df["그룹코드"] == "ST")
         & (df["우선주"] == 0)
+        & (df["거래정지"] != "Y")
         & (df["시가총액"] >= MIN_MARKET_CAP_EOK)
     ]
     return [
@@ -182,6 +183,7 @@ def get_kosdaq_tickers():
         (df["증권그룹구분코드"] == "ST")
         & (df["우선주구분코드"] == 0)
         & (df["기업인수목적회사여부"] == "N")
+        & (df["거래정지여부"] != "Y")
         & (df["전일기준시가총액"] >= MIN_MARKET_CAP_EOK)
     ]
     return [
