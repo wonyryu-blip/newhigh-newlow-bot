@@ -1,0 +1,8 @@
+.env
+token_cache.json
+run_log*.txt
+run_*.txt
+*_log.txt
+raw_*.json
+*.mst
+*.zip
