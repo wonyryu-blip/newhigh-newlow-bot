@@ -40,7 +40,7 @@ import datetime
 import pandas as pd
 import requests
 
-BASE_URL = "https://openapivts.koreainvestment.com:29443"  # 모의투자 도메인
+BASE_URL = "https://openapi.koreainvestment.com:9443"  # 실전투자 도메인
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 SAMPLE_LIMIT = 10          # 프로토타입 검증용: 코스피/코스닥 각각 이 개수만 조회

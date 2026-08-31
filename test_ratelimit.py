@@ -2,7 +2,7 @@
 import json, time
 import requests
 
-BASE_URL = "https://openapivts.koreainvestment.com:29443"
+BASE_URL = "https://openapi.koreainvestment.com:9443"
 
 def load_env(path=".env"):
     env = {}

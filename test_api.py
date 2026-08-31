@@ -15,19 +15,17 @@ KIS Developers "국내주식 신고/신저근접종목 상위" API 실제 호출
 
 주의:
   - 조회(읽기 전용) API만 호출합니다. 주문/매매는 절대 하지 않습니다.
-  - 이 .env의 앱키는 모의투자용이므로 모의투자 도메인
-    (openapivts.koreainvestment.com:29443)을 사용합니다.
-  - 순위분석(신고/신저근접종목) 같은 일부 API는 모의투자 환경에서
-    아예 지원되지 않을 수도 있습니다. 이 스크립트를 돌려보면 그
-    지원 여부 자체도 함께 확인됩니다(오류 응답이 나오면 미지원
-    가능성이 큼).
+  - 이 .env의 KIS_APP_KEY/SECRET은 실전투자용이므로 실전투자 도메인
+    (openapi.koreainvestment.com:9443)을 사용합니다. 모의투자 키로
+    테스트하려면 .env의 KIS_DEMO_APP_KEY/SECRET을 쓰고 BASE_URL을
+    "https://openapivts.koreainvestment.com:29443"로 바꾸면 됩니다.
 """
 
 import os
 import json
 import requests
 
-BASE_URL = "https://openapivts.koreainvestment.com:29443"  # 모의투자 도메인
+BASE_URL = "https://openapi.koreainvestment.com:9443"  # 실전투자 도메인
 
 
 def load_env(path=".env"):
