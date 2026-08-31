@@ -1,0 +1,29 @@
+name: Daily new-high/new-low alert
+
+on:
+  schedule:
+    # UTC 일~목 22:45 = KST 월~금 07:45 (전일 종가 기준, 장 시작 09:00 전 여유있게)
+    - cron: '45 22 * * 0-4'
+  workflow_dispatch: {}   # Actions 탭에서 수동 실행 버튼
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run screening + send to Telegram
+        env:
+          KIS_APP_KEY: ${{ secrets.KIS_APP_KEY }}
+          KIS_APP_SECRET: ${{ secrets.KIS_APP_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: python main.py
