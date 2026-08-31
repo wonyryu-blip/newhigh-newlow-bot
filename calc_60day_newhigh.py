@@ -48,52 +48,136 @@ CALL_INTERVAL_SEC = 0.6    # 종목별 호출 사이 대기(모의투자 기준 
 
 
 # ---------------------------------------------------------------------------
-# 1) 종목마스터 다운로드/파싱 (KIS 공식 샘플 코드 축약판)
+# 1) 종목마스터 다운로드/파싱 (KIS 공식 샘플 코드 기반)
+#
+#    실제 마스터파일을 뜯어본 결과(2026-08-31 기준):
+#      - 그룹코드/증권그룹구분코드 == 'ST' 인 것만 남기면 ETF(EF)/ETN(EN)/
+#        파생결합증권(BC)/리츠(RT)/외국주권(FS)/예탁증서(DR) 등이 전부
+#        빠지고 "주권(株券)"만 남는다. ELW는 이 마스터파일 자체에 아예
+#        포함되어 있지 않아(별도 파일) 추가 필터 없이 자동으로 제외된다.
+#      - 우선주는 '우선주'/'우선주구분코드' 컬럼이 0이 아닌 행이므로
+#        ==0 인 것만 남기면 보통주만 남는다(코스피 916개 중 805개,
+#        "삼성전자우" 같은 종목들이 제외됨).
+#      - 스팩(기업인수목적회사)은 코스닥에만 있고(코스피는 전부 N),
+#        '기업인수목적회사여부' == 'N' 인 것만 남기면 제외된다.
+#    최종: 코스피 805종목 + 코스닥 1,730종목 = 총 2,535종목(순수 보통주)
 # ---------------------------------------------------------------------------
 
 def _download_mst(url, zip_path, mst_name):
+    mst_path = os.path.join(BASE_DIR, mst_name)
+    if os.path.exists(mst_path):
+        return mst_path
     ssl._create_default_https_context = ssl._create_unverified_context
     urllib.request.urlretrieve(url, zip_path)
     with zipfile.ZipFile(zip_path) as z:
         z.extractall(BASE_DIR)
     os.remove(zip_path)
-    return os.path.join(BASE_DIR, mst_name)
+    return mst_path
 
 
 def get_kospi_tickers():
-    mst_path = os.path.join(BASE_DIR, "kospi_code.mst")
-    if not os.path.exists(mst_path):
-        mst_path = _download_mst(
-            "https://new.real.download.dws.co.kr/common/master/kospi_code.mst.zip",
-            os.path.join(BASE_DIR, "kospi_code.zip"),
-            "kospi_code.mst",
-        )
-    codes = []
-    with open(mst_path, mode="r", encoding="cp949") as f:
-        for row in f:
-            rf1 = row[0: len(row) - 228]
-            code = rf1[0:9].rstrip()
-            name = rf1[21:].strip()
-            codes.append((code, name, "KOSPI"))
-    return codes
+    mst_path = _download_mst(
+        "https://new.real.download.dws.co.kr/common/master/kospi_code.mst.zip",
+        os.path.join(BASE_DIR, "kospi_code.zip"),
+        "kospi_code.mst",
+    )
+
+    tmp1 = os.path.join(BASE_DIR, "_kospi_part1.tmp")
+    tmp2 = os.path.join(BASE_DIR, "_kospi_part2.tmp")
+    with open(tmp1, "w", encoding="utf-8") as wf1, open(tmp2, "w", encoding="utf-8") as wf2:
+        with open(mst_path, mode="r", encoding="cp949") as f:
+            for row in f:
+                rf1 = row[0:len(row) - 228]
+                wf1.write(rf1[0:9].rstrip() + "," + rf1[21:].strip() + "\n")
+                wf2.write(row[-228:])
+
+    df1 = pd.read_csv(tmp1, header=None, names=["단축코드", "한글명"], encoding="utf-8")
+
+    # KIS 공식 kis_kospi_code_mst.py의 field_specs/part2_columns 그대로 사용
+    field_specs = [2, 1, 4, 4, 4, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+                   1, 1, 1, 1, 1, 1, 9, 5, 5, 1, 1, 1, 2, 1, 1, 1, 2, 2, 2, 3, 1, 3, 12, 12, 8,
+                   15, 21, 2, 7, 1, 1, 1, 1, 1, 9, 9, 9, 5, 9, 8, 9, 3, 1, 1, 1]
+    part2_columns = ["그룹코드", "시가총액규모", "지수업종대분류", "지수업종중분류", "지수업종소분류",
+                      "제조업", "저유동성", "지배구조지수종목", "KOSPI200섹터업종", "KOSPI100",
+                      "KOSPI50", "KRX", "ETP", "ELW발행", "KRX100", "KRX자동차", "KRX반도체",
+                      "KRX바이오", "KRX은행", "SPAC", "KRX에너지화학", "KRX철강", "단기과열",
+                      "KRX미디어통신", "KRX건설", "Non1", "KRX증권", "KRX선박", "KRX섹터_보험",
+                      "KRX섹터_운송", "SRI", "기준가", "매매수량단위", "시간외수량단위", "거래정지",
+                      "정리매매", "관리종목", "시장경고", "경고예고", "불성실공시", "우회상장",
+                      "락구분", "액면변경", "증자구분", "증거금비율", "신용가능", "신용기간",
+                      "전일거래량", "액면가", "상장일자", "상장주수", "자본금", "결산월", "공모가",
+                      "우선주", "공매도과열", "이상급등", "KRX300", "KOSPI", "매출액", "영업이익",
+                      "경상이익", "당기순이익", "ROE", "기준년월", "시가총액", "그룹사코드",
+                      "회사신용한도초과", "담보대출가능", "대주가능"]
+    df2 = pd.read_fwf(tmp2, widths=field_specs, names=part2_columns)
+    df = pd.merge(df1, df2, how="outer", left_index=True, right_index=True)
+    os.remove(tmp1)
+    os.remove(tmp2)
+
+    pure = df[(df["그룹코드"] == "ST") & (df["우선주"] == 0)]
+    return [(row["단축코드"], row["한글명"], "KOSPI") for _, row in pure.iterrows()]
 
 
 def get_kosdaq_tickers():
-    mst_path = os.path.join(BASE_DIR, "kosdaq_code.mst")
-    if not os.path.exists(mst_path):
-        mst_path = _download_mst(
-            "https://new.real.download.dws.co.kr/common/master/kosdaq_code.mst.zip",
-            os.path.join(BASE_DIR, "kosdaq_code.zip"),
-            "kosdaq_code.mst",
-        )
-    codes = []
-    with open(mst_path, mode="r", encoding="cp949") as f:
-        for row in f:
-            rf1 = row[0: len(row) - 222]
-            code = rf1[0:9].rstrip()
-            name = rf1[21:].strip()
-            codes.append((code, name, "KOSDAQ"))
-    return codes
+    mst_path = _download_mst(
+        "https://new.real.download.dws.co.kr/common/master/kosdaq_code.mst.zip",
+        os.path.join(BASE_DIR, "kosdaq_code.zip"),
+        "kosdaq_code.mst",
+    )
+
+    tmp1 = os.path.join(BASE_DIR, "_kosdaq_part1.tmp")
+    tmp2 = os.path.join(BASE_DIR, "_kosdaq_part2.tmp")
+    with open(tmp1, "w", encoding="utf-8") as wf1, open(tmp2, "w", encoding="utf-8") as wf2:
+        with open(mst_path, mode="r", encoding="cp949") as f:
+            for row in f:
+                rf1 = row[0:len(row) - 222]
+                wf1.write(rf1[0:9].rstrip() + "," + rf1[21:].strip() + "\n")
+                wf2.write(row[-222:])
+
+    df1 = pd.read_csv(tmp1, header=None, names=["단축코드", "한글종목명"], encoding="utf-8")
+
+    # KIS 공식 kis_kosdaq_code_mst.py의 field_specs/part2_columns 그대로 사용(64개)
+    field_specs = [2, 1,
+                   4, 4, 4, 1, 1,
+                   1, 1, 1, 1, 1,
+                   1, 1, 1, 1, 1,
+                   1, 1, 1, 1, 1,
+                   1, 1, 1, 1, 9,
+                   5, 5, 1, 1, 1,
+                   2, 1, 1, 1, 2,
+                   2, 2, 3, 1, 3,
+                   12, 12, 8, 15, 21,
+                   2, 7, 1, 1, 1,
+                   1, 9, 9, 9, 5,
+                   9, 8, 9, 3, 1,
+                   1, 1
+                   ]
+    part2_columns = ["증권그룹구분코드", "시가총액규모구분코드유가", "지수업종대분류코드",
+                      "지수업종중분류코드", "지수업종소분류코드", "벤처기업여부", "저유동성종목여부",
+                      "KRX종목여부", "ETP상품구분코드", "KRX100종목여부", "KRX자동차여부",
+                      "KRX반도체여부", "KRX바이오여부", "KRX은행여부", "기업인수목적회사여부",
+                      "KRX에너지화학여부", "KRX철강여부", "단기과열종목구분코드", "KRX미디어통신여부",
+                      "KRX건설여부", "투자주의환기종목여부", "KRX증권구분", "KRX선박구분",
+                      "KRX섹터보험여부", "KRX섹터운송여부", "KOSDAQ150지수여부", "주식기준가",
+                      "정규시장매매수량단위", "시간외시장매매수량단위", "거래정지여부", "정리매매여부",
+                      "관리종목여부", "시장경고구분코드", "시장경고위험예고여부", "불성실공시여부",
+                      "우회상장여부", "락구분코드", "액면가변경구분코드", "증자구분코드", "증거금비율",
+                      "신용주문가능여부", "신용기간", "전일거래량", "주식액면가", "주식상장일자",
+                      "상장주수", "자본금", "결산월", "공모가격", "우선주구분코드", "공매도과열종목여부",
+                      "이상급등종목여부", "KRX300종목여부", "매출액", "영업이익", "경상이익",
+                      "당기순이익", "ROE", "기준년월", "전일기준시가총액", "그룹사코드",
+                      "회사신용한도초과여부", "담보대출가능여부", "대주가능여부"]
+    df2 = pd.read_fwf(tmp2, widths=field_specs, names=part2_columns)
+    df = pd.merge(df1, df2, how="outer", left_index=True, right_index=True)
+    os.remove(tmp1)
+    os.remove(tmp2)
+
+    pure = df[
+        (df["증권그룹구분코드"] == "ST")
+        & (df["우선주구분코드"] == 0)
+        & (df["기업인수목적회사여부"] == "N")
+    ]
+    return [(row["단축코드"], row["한글종목명"], "KOSDAQ") for _, row in pure.iterrows()]
 
 
 # ---------------------------------------------------------------------------
