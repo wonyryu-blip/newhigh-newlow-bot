@@ -7,3 +7,4 @@ raw_*.json
 *.mst
 *.zip
 public/
+__pycache__/

@@ -217,6 +217,27 @@ def kis_headers(token, app_key, app_secret, tr_id, tr_cont=""):
 
 
 # ---------------------------------------------------------------------------
+# 휴장일 판별 — 전일이 휴장(주말/공휴일/대체공휴일 포함)이면 그날은 새로
+# 생긴 신고가/신저가 데이터가 없으므로 작업을 건너뜀
+# ---------------------------------------------------------------------------
+
+def is_market_open(token, app_key, app_secret, date):
+    """date: datetime.date. 국내휴장일조회(TCA0903R) — KIS 안내상 잦은 호출을
+    피하라고 되어 있어 하루 실행당 1회만 호출함."""
+    url = f"{BASE_URL}/uapi/domestic-stock/v1/quotations/chk-holiday"
+    headers = kis_headers(token, app_key, app_secret, "CTCA0903R")
+    bass_dt = date.strftime("%Y%m%d")
+    params = {"BASS_DT": bass_dt, "CTX_AREA_FK": "", "CTX_AREA_NK": ""}
+    res = requests.get(url, headers=headers, params=params, timeout=10)
+    data = res.json()
+    for row in data.get("output", []):
+        if row.get("bass_dt") == bass_dt:
+            return row.get("opnd_yn") == "Y"
+    # 조회 실패/데이터 없음 → 안전하게 "개장"으로 간주하고 정상 진행
+    return True
+
+
+# ---------------------------------------------------------------------------
 # 52주(서버 기준) 신고가/신저가 — 근접비율 0.00% = 실제 경신 종목
 # ---------------------------------------------------------------------------
 
@@ -454,6 +475,50 @@ def build_html_report(today_str, high52, low52, high60, low60):
     return html
 
 
+def build_closed_html(today_str):
+    return f"""<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{today_str} 신고가·신저가 리포트</title>
+<style>
+  :root {{ --bg:#f7f8fa; --card:#ffffff; --text:#1a1d23; --muted:#6b7280; --border:#e5e7eb; }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{ --bg:#0f1115; --card:#1a1d23; --text:#e8eaed; --muted:#9aa0a6; --border:#2a2e37; }}
+  }}
+  body {{ margin:0; background:var(--bg); color:var(--text); min-height:100vh;
+    display:flex; align-items:center; justify-content:center;
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Pretendard,Roboto,sans-serif; }}
+  .card {{ background:var(--card); border:1px solid var(--border); border-radius:12px;
+    padding:32px 28px; text-align:center; max-width:360px; }}
+  .card p {{ color:var(--muted); margin:8px 0 0; font-size:0.9rem; }}
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>📕 {today_str}</h1>
+    <p>증시 휴장으로 전일자 신고가·신저가 리포트는 없습니다.</p>
+  </div>
+</body>
+</html>"""
+
+
+def send_telegram_closed(token, chat_id, today_str):
+    text = f"📕 {today_str}\n증시 휴장으로 전일자 신고신저 리포트는 없습니다."
+    if not token or not chat_id:
+        print("[텔레그램 미설정 - 콘솔 출력]\n")
+        print(text)
+        return
+    res = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data={"chat_id": chat_id, "text": text},
+        timeout=10,
+    )
+    if res.status_code != 200:
+        print("텔레그램 전송 실패:", res.status_code, res.text)
+
+
 def send_telegram_link(token, chat_id, today_str, high52, low52, high60, low60, url):
     text = (
         f"📈 {today_str} 국내증시 신고가·신저가 리포트\n"
@@ -486,6 +551,24 @@ def main():
     telegram_chat_id = env.get("TELEGRAM_CHAT_ID")
     sample_limit = int(env.get("SAMPLE_LIMIT", "0") or "0")
 
+    today_str = datetime.date.today().strftime("%Y-%m-%d")
+
+    print("=== 0) 전일(직전 영업일) 휴장 여부 확인 ===")
+    token = get_token(app_key, app_secret)
+    # 월요일이면 "전일"은 일요일이 아니라 지난 금요일을 봐야 함(주말 자체는
+    # 이미 cron에서 걸러지므로, 여기서는 "달력상 어제"가 아니라 "가장 최근
+    # 평일"이 실제로 개장했는지를 확인)
+    weekday = datetime.date.today().weekday()  # 월=0
+    lookback_days = 3 if weekday == 0 else 1
+    prev_business_day = datetime.date.today() - datetime.timedelta(days=lookback_days)
+    if not is_market_open(token, app_key, app_secret, prev_business_day):
+        print(f"직전 영업일({prev_business_day}) 증시 휴장 → 작업 건너뜀")
+        os.makedirs(PUBLIC_DIR, exist_ok=True)
+        with open(os.path.join(PUBLIC_DIR, "index.html"), "w", encoding="utf-8") as f:
+            f.write(build_closed_html(today_str))
+        send_telegram_closed(telegram_token, telegram_chat_id, today_str)
+        return
+
     print("=== 1) 순수 보통주 + 시가총액 1000억 이상 종목마스터 준비 ===")
     kospi = get_kospi_tickers()
     kosdaq = get_kosdaq_tickers()
@@ -494,9 +577,6 @@ def main():
         universe = kospi[:sample_limit] + kosdaq[:sample_limit]
     mcap_map = {code: (name, market, mcap) for code, name, market, mcap in (kospi + kosdaq)}
     print(f"코스피 {len(kospi)}종목 + 코스닥 {len(kosdaq)}종목 (필터 후), 이번 실행 대상 {len(universe)}종목")
-
-    print("=== 2) 인증 ===")
-    token = get_token(app_key, app_secret)
 
     print("=== 3) 52주 신고가/신저가 조회 ===")
     high52_raw, low52_raw = get_52week_events(token, app_key, app_secret, mcap_map)
@@ -509,8 +589,6 @@ def main():
     high60 = build_table_rows_60d(high60_raw)
     low60 = build_table_rows_60d(low60_raw)
     print(f"60일 신고가 {len(high60)}종목, 60일 신저가 {len(low60)}종목")
-
-    today_str = datetime.date.today().strftime("%Y-%m-%d")
 
     print("=== 5) HTML 리포트 생성 ===")
     html = build_html_report(today_str, high52, low52, high60, low60)
