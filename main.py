@@ -33,9 +33,16 @@ import requests
 
 BASE_URL = "https://openapi.koreainvestment.com:9443"  # 실전투자 도메인
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+PUBLIC_DIR = os.path.join(BASE_DIR, "public")
 
 # 실전투자 API 호출 제한(공식 안내 초당 20건)에 여유를 둔 호출 간격
 CALL_INTERVAL_SEC = 0.08
+
+# 시가총액 필터 기준(단위: 억원). 1000 = 1,000억원
+MIN_MARKET_CAP_EOK = 1000
+
+# GitHub Pages 배포 URL (repo public 전환 + Pages(Actions) 활성화 완료)
+REPORT_URL = "https://wonyryu-blip.github.io/newhigh-newlow-bot/"
 
 
 # ---------------------------------------------------------------------------
@@ -109,8 +116,15 @@ def get_kospi_tickers():
     os.remove(tmp1)
     os.remove(tmp2)
 
-    pure = df[(df["그룹코드"] == "ST") & (df["우선주"] == 0)]
-    return [(row["단축코드"], row["한글명"], "KOSPI") for _, row in pure.iterrows()]
+    pure = df[
+        (df["그룹코드"] == "ST")
+        & (df["우선주"] == 0)
+        & (df["시가총액"] >= MIN_MARKET_CAP_EOK)
+    ]
+    return [
+        (row["단축코드"], row["한글명"], "KOSPI", int(row["시가총액"]))
+        for _, row in pure.iterrows()
+    ]
 
 
 def get_kosdaq_tickers():
@@ -168,8 +182,12 @@ def get_kosdaq_tickers():
         (df["증권그룹구분코드"] == "ST")
         & (df["우선주구분코드"] == 0)
         & (df["기업인수목적회사여부"] == "N")
+        & (df["전일기준시가총액"] >= MIN_MARKET_CAP_EOK)
     ]
-    return [(row["단축코드"], row["한글종목명"], "KOSDAQ") for _, row in pure.iterrows()]
+    return [
+        (row["단축코드"], row["한글종목명"], "KOSDAQ", int(row["전일기준시가총액"]))
+        for _, row in pure.iterrows()
+    ]
 
 
 # ---------------------------------------------------------------------------
@@ -233,18 +251,19 @@ def fetch_near_new_highlow(token, app_key, app_secret, fid_prc_cls_code, max_pag
     return all_rows
 
 
-def get_52week_events(token, app_key, app_secret, pure_codes):
-    """returns (new_high_rows, new_low_rows), 순수 보통주로만 교차 필터링됨"""
+def get_52week_events(token, app_key, app_secret, mcap_map):
+    """returns (new_high_rows, new_low_rows). mcap_map = {code: (name, market, mcap_억원)}
+    에 있는 종목(=순수 보통주 + 시가총액 1000억 이상)으로만 교차 필터링됨."""
     high_rows = fetch_near_new_highlow(token, app_key, app_secret, "0")
     low_rows = fetch_near_new_highlow(token, app_key, app_secret, "1")
 
     new_high = [
         r for r in high_rows
-        if r.get("mksc_shrn_iscd") in pure_codes and float(r.get("hprc_near_rate", "1") or 1) == 0.0
+        if r.get("mksc_shrn_iscd") in mcap_map and float(r.get("hprc_near_rate", "1") or 1) == 0.0
     ]
     new_low = [
         r for r in low_rows
-        if r.get("mksc_shrn_iscd") in pure_codes and float(r.get("lwpr_near_rate", "1") or 1) == 0.0
+        if r.get("mksc_shrn_iscd") in mcap_map and float(r.get("lwpr_near_rate", "1") or 1) == 0.0
     ]
     return new_high, new_low
 
@@ -293,8 +312,9 @@ def judge_new_high_low(closes):
 
 
 def get_60day_events(token, app_key, app_secret, universe):
+    """universe: [(code, name, market, mcap_억원), ...]"""
     new_high, new_low = [], []
-    for code, name, market in universe:
+    for code, name, market, mcap in universe:
         closes, err = fetch_daily_closes(token, app_key, app_secret, code)
         time.sleep(CALL_INTERVAL_SEC)
         if err or not closes:
@@ -303,66 +323,155 @@ def get_60day_events(token, app_key, app_secret, universe):
         if r is None:
             continue
         if r["is_new_high"]:
-            new_high.append((market, code, name, r))
+            new_high.append((market, code, name, mcap, r))
         if r["is_new_low"]:
-            new_low.append((market, code, name, r))
+            new_low.append((market, code, name, mcap, r))
     return new_high, new_low
 
 
 # ---------------------------------------------------------------------------
-# 메시지 포맷 + 텔레그램 전송
+# 시가총액 포맷 + HTML 리포트 생성 + 텔레그램 전송(링크만)
 # ---------------------------------------------------------------------------
 
-def fmt_52w_line(row):
-    return f"  {row.get('hts_kor_isnm')}({row.get('mksc_shrn_iscd')})  {row.get('stck_prpr')}원"
+def fmt_mcap(mcap_eok):
+    """mcap_eok: 억원 단위 정수 → '1.5조원' 또는 '1,234억원'"""
+    if mcap_eok >= 10000:
+        return f"{mcap_eok / 10000:.1f}조원"
+    return f"{mcap_eok:,}억원"
 
 
-def fmt_60d_line(item):
-    market, code, name, r = item
-    return f"  [{market}] {name}({code})  {r['latest_close']}원"
+def html_escape(s):
+    return (
+        str(s)
+        .replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+    )
 
 
-def build_message(today_str, high52, low52, high60, low60):
-    lines = [f"📈 {today_str} 국내증시 신고가/신저가 스크리닝 (전일 종가 기준)", ""]
-
-    lines.append(f"[52주 신고가] {len(high52)}종목")
-    lines += [fmt_52w_line(r) for r in high52[:50]] or ["  없음"]
-    if len(high52) > 50:
-        lines.append(f"  ...외 {len(high52) - 50}종목")
-    lines.append("")
-
-    lines.append(f"[52주 신저가] {len(low52)}종목")
-    lines += [fmt_52w_line(r) for r in low52[:50]] or ["  없음"]
-    if len(low52) > 50:
-        lines.append(f"  ...외 {len(low52) - 50}종목")
-    lines.append("")
-
-    lines.append(f"[60일 신고가] {len(high60)}종목")
-    lines += [fmt_60d_line(r) for r in high60[:50]] or ["  없음"]
-    if len(high60) > 50:
-        lines.append(f"  ...외 {len(high60) - 50}종목")
-    lines.append("")
-
-    lines.append(f"[60일 신저가] {len(low60)}종목")
-    lines += [fmt_60d_line(r) for r in low60[:50]] or ["  없음"]
-    if len(low60) > 50:
-        lines.append(f"  ...외 {len(low60) - 50}종목")
-
-    return "\n".join(lines)
+def build_table_rows_52w(rows, mcap_map):
+    enriched = []
+    for r in rows:
+        code = r.get("mksc_shrn_iscd")
+        name, market, mcap = mcap_map.get(code, (r.get("hts_kor_isnm"), "-", 0))
+        enriched.append((market, code, name, mcap))
+    enriched.sort(key=lambda x: x[3], reverse=True)
+    return enriched
 
 
-def send_telegram(token, chat_id, text):
+def build_table_rows_60d(rows):
+    # rows: [(market, code, name, mcap, judge_result), ...]
+    enriched = [(market, code, name, mcap) for market, code, name, mcap, _ in rows]
+    enriched.sort(key=lambda x: x[3], reverse=True)
+    return enriched
+
+
+def render_table(title, rows, badge_class):
+    if not rows:
+        body = '<p class="empty">해당 종목 없음</p>'
+    else:
+        trs = []
+        for i, (market, code, name, mcap) in enumerate(rows, 1):
+            trs.append(
+                f"<tr><td>{i}</td><td>{html_escape(name)}</td>"
+                f"<td class='code'>{html_escape(code)}</td>"
+                f"<td><span class='mkt {market.lower()}'>{market}</span></td>"
+                f"<td class='mcap'>{fmt_mcap(mcap)}</td></tr>"
+            )
+        body = (
+            "<table><thead><tr><th>#</th><th>종목명</th><th>코드</th>"
+            "<th>시장</th><th>시가총액</th></tr></thead>"
+            f"<tbody>{''.join(trs)}</tbody></table>"
+        )
+    return (
+        f"<section class='card'><h2><span class='badge {badge_class}'></span>"
+        f"{title} <span class='count'>{len(rows)}종목</span></h2>{body}</section>"
+    )
+
+
+def build_html_report(today_str, high52, low52, high60, low60):
+    total = len(high52) + len(low52) + len(high60) + len(low60)
+    sections = (
+        render_table("52주 신고가", high52, "up")
+        + render_table("52주 신저가", low52, "down")
+        + render_table("60일 신고가", high60, "up")
+        + render_table("60일 신저가", low60, "down")
+    )
+    html = f"""<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{today_str} 신고가·신저가 리포트</title>
+<style>
+  :root {{
+    --bg:#f7f8fa; --card:#ffffff; --text:#1a1d23; --muted:#6b7280;
+    --border:#e5e7eb; --up:#d1293d; --down:#1d5fd6; --accent:#111827;
+  }}
+  @media (prefers-color-scheme: dark) {{
+    :root {{ --bg:#0f1115; --card:#1a1d23; --text:#e8eaed; --muted:#9aa0a6; --border:#2a2e37; --accent:#e8eaed; }}
+  }}
+  * {{ box-sizing:border-box; }}
+  body {{ margin:0; background:var(--bg); color:var(--text);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Pretendard,Roboto,sans-serif; }}
+  header {{ padding:28px 20px 16px; max-width:900px; margin:0 auto; }}
+  header h1 {{ font-size:1.4rem; margin:0 0 4px; }}
+  header p {{ margin:0; color:var(--muted); font-size:0.9rem; }}
+  main {{ max-width:900px; margin:0 auto; padding:0 20px 40px; display:flex; flex-direction:column; gap:16px; }}
+  .card {{ background:var(--card); border:1px solid var(--border); border-radius:12px; padding:18px 20px; }}
+  .card h2 {{ font-size:1.05rem; margin:0 0 12px; display:flex; align-items:center; gap:8px; }}
+  .count {{ margin-left:auto; font-size:0.8rem; font-weight:400; color:var(--muted); }}
+  .badge {{ width:10px; height:10px; border-radius:50%; display:inline-block; }}
+  .badge.up {{ background:var(--up); }}
+  .badge.down {{ background:var(--down); }}
+  table {{ width:100%; border-collapse:collapse; font-size:0.88rem; }}
+  th {{ text-align:left; color:var(--muted); font-weight:500; padding:6px 8px; border-bottom:1px solid var(--border); }}
+  td {{ padding:8px; border-bottom:1px solid var(--border); }}
+  td.code {{ color:var(--muted); font-variant-numeric:tabular-nums; }}
+  td.mcap {{ text-align:right; font-variant-numeric:tabular-nums; font-weight:600; }}
+  .mkt {{ font-size:0.72rem; padding:2px 6px; border-radius:6px; font-weight:600; }}
+  .mkt.kospi {{ background:#eef2ff; color:#3730a3; }}
+  .mkt.kosdaq {{ background:#ecfdf5; color:#065f46; }}
+  @media (prefers-color-scheme: dark) {{
+    .mkt.kospi {{ background:#1e2247; color:#a5b4fc; }}
+    .mkt.kosdaq {{ background:#0d2b21; color:#6ee7b7; }}
+  }}
+  .empty {{ color:var(--muted); font-size:0.88rem; margin:0; }}
+  footer {{ max-width:900px; margin:0 auto; padding:0 20px 40px; color:var(--muted); font-size:0.78rem; }}
+</style>
+</head>
+<body>
+<header>
+  <h1>📈 {today_str} 국내증시 신고가·신저가 리포트</h1>
+  <p>코스피·코스닥 순수 보통주 · 시가총액 {MIN_MARKET_CAP_EOK:,}억원 이상 · 전일 종가 기준 · 총 {total}종목</p>
+</header>
+<main>
+{sections}
+</main>
+<footer>매일 아침 자동 생성됩니다 · 데이터 출처: 한국투자증권 KIS Developers</footer>
+</body>
+</html>"""
+    return html
+
+
+def send_telegram_link(token, chat_id, today_str, high52, low52, high60, low60, url):
+    text = (
+        f"📈 {today_str} 국내증시 신고가·신저가 리포트\n"
+        f"52주 신고가 {len(high52)} · 52주 신저가 {len(low52)} · "
+        f"60일 신고가 {len(high60)} · 60일 신저가 {len(low60)}\n\n"
+        f"{url}"
+    )
     if not token or not chat_id:
         print("[텔레그램 미설정 - 콘솔 출력]\n")
         print(text)
         return
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    # 텔레그램 메시지 4096자 제한 → 여유있게 3500자 단위로 분할 전송
-    for i in range(0, len(text), 3500):
-        chunk = text[i:i + 3500]
-        res = requests.post(url, data={"chat_id": chat_id, "text": chunk}, timeout=10)
-        if res.status_code != 200:
-            print("텔레그램 전송 실패:", res.status_code, res.text)
+    res = requests.post(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        data={"chat_id": chat_id, "text": text},
+        timeout=10,
+    )
+    if res.status_code != 200:
+        print("텔레그램 전송 실패:", res.status_code, res.text)
 
 
 # ---------------------------------------------------------------------------
@@ -377,31 +486,41 @@ def main():
     telegram_chat_id = env.get("TELEGRAM_CHAT_ID")
     sample_limit = int(env.get("SAMPLE_LIMIT", "0") or "0")
 
-    print("=== 1) 순수 보통주 종목마스터 준비 ===")
+    print("=== 1) 순수 보통주 + 시가총액 1000억 이상 종목마스터 준비 ===")
     kospi = get_kospi_tickers()
     kosdaq = get_kosdaq_tickers()
     universe = kospi + kosdaq
     if sample_limit:
         universe = kospi[:sample_limit] + kosdaq[:sample_limit]
-    pure_codes = {code for code, _, _ in (kospi + kosdaq)}
+    mcap_map = {code: (name, market, mcap) for code, name, market, mcap in (kospi + kosdaq)}
     print(f"코스피 {len(kospi)}종목 + 코스닥 {len(kosdaq)}종목 (필터 후), 이번 실행 대상 {len(universe)}종목")
 
     print("=== 2) 인증 ===")
     token = get_token(app_key, app_secret)
 
     print("=== 3) 52주 신고가/신저가 조회 ===")
-    high52, low52 = get_52week_events(token, app_key, app_secret, pure_codes)
+    high52_raw, low52_raw = get_52week_events(token, app_key, app_secret, mcap_map)
+    high52 = build_table_rows_52w(high52_raw, mcap_map)
+    low52 = build_table_rows_52w(low52_raw, mcap_map)
     print(f"52주 신고가 {len(high52)}종목, 52주 신저가 {len(low52)}종목")
 
     print("=== 4) 60일 신고가/신저가 계산 ===")
-    high60, low60 = get_60day_events(token, app_key, app_secret, universe)
+    high60_raw, low60_raw = get_60day_events(token, app_key, app_secret, universe)
+    high60 = build_table_rows_60d(high60_raw)
+    low60 = build_table_rows_60d(low60_raw)
     print(f"60일 신고가 {len(high60)}종목, 60일 신저가 {len(low60)}종목")
 
     today_str = datetime.date.today().strftime("%Y-%m-%d")
-    message = build_message(today_str, high52, low52, high60, low60)
 
-    print("=== 5) 텔레그램 전송 ===")
-    send_telegram(telegram_token, telegram_chat_id, message)
+    print("=== 5) HTML 리포트 생성 ===")
+    html = build_html_report(today_str, high52, low52, high60, low60)
+    os.makedirs(PUBLIC_DIR, exist_ok=True)
+    with open(os.path.join(PUBLIC_DIR, "index.html"), "w", encoding="utf-8") as f:
+        f.write(html)
+    print(f"저장됨: {os.path.join(PUBLIC_DIR, 'index.html')}")
+
+    print("=== 6) 텔레그램 전송(링크만) ===")
+    send_telegram_link(telegram_token, telegram_chat_id, today_str, high52, low52, high60, low60, REPORT_URL)
 
 
 if __name__ == "__main__":

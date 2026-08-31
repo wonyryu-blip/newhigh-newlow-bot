@@ -6,3 +6,4 @@ run_*.txt
 raw_*.json
 *.mst
 *.zip
+public/
