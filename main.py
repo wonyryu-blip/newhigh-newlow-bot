@@ -193,12 +193,32 @@ def get_kosdaq_tickers():
 
 
 # ---------------------------------------------------------------------------
+# 재시도 로직 — KIS 서버가 간헐적으로 연결 타임아웃/커넥션 끊김을 일으키는
+# 문제 대응(실측 장애: 2026-09-10 RemoteDisconnected, 2026-09-21 ConnectTimeout,
+# 둘 다 get_token 단계에서 발생해 스크립트가 알림 없이 죽었음). 연결계열
+# 오류만 지수 백오프로 재시도하고, 그 외 오류(예: HTTP 4xx/5xx)는 그대로 올림.
+# ---------------------------------------------------------------------------
+
+def request_with_retry(method, url, max_attempts=3, backoff_sec=5, **kwargs):
+    for attempt in range(1, max_attempts + 1):
+        try:
+            return requests.request(method, url, **kwargs)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            if attempt == max_attempts:
+                raise
+            wait = backoff_sec * attempt
+            print(f"  [재시도 {attempt}/{max_attempts - 1}] {url} 연결 실패"
+                  f"({type(e).__name__}) → {wait}초 후 재시도")
+            time.sleep(wait)
+
+
+# ---------------------------------------------------------------------------
 # KIS 인증 + 공통 헤더
 # ---------------------------------------------------------------------------
 
 def get_token(app_key, app_secret):
-    res = requests.post(
-        f"{BASE_URL}/oauth2/tokenP",
+    res = request_with_retry(
+        "POST", f"{BASE_URL}/oauth2/tokenP",
         json={"grant_type": "client_credentials", "appkey": app_key, "appsecret": app_secret},
         timeout=10,
     )
@@ -230,7 +250,7 @@ def is_market_open(token, app_key, app_secret, date):
     headers = kis_headers(token, app_key, app_secret, "CTCA0903R")
     bass_dt = date.strftime("%Y%m%d")
     params = {"BASS_DT": bass_dt, "CTX_AREA_FK": "", "CTX_AREA_NK": ""}
-    res = requests.get(url, headers=headers, params=params, timeout=10)
+    res = request_with_retry("GET", url, headers=headers, params=params, timeout=10)
     data = res.json()
     for row in data.get("output", []):
         if row.get("bass_dt") == bass_dt:
@@ -263,7 +283,7 @@ def fetch_near_new_highlow(token, app_key, app_secret, fid_prc_cls_code, max_pag
     tr_cont = ""
     for _ in range(max_pages):
         headers = kis_headers(token, app_key, app_secret, "FHPST01870000", tr_cont)
-        res = requests.get(url, headers=headers, params=params, timeout=10)
+        res = request_with_retry("GET", url, headers=headers, params=params, timeout=10)
         data = res.json()
         all_rows.extend(data.get("output", []))
         # KIS 관례: 응답 헤더의 tr_cont == "M" 이면 다음 페이지 있음
@@ -308,7 +328,7 @@ def fetch_daily_closes(token, app_key, app_secret, code, days=65):
         "FID_PERIOD_DIV_CODE": "D",
         "FID_ORG_ADJ_PRC": "1",
     }
-    res = requests.get(url, headers=headers, params=params, timeout=10)
+    res = request_with_retry("GET", url, headers=headers, params=params, timeout=10)
     data = res.json()
     if data.get("rt_cd") != "0":
         return None, data.get("msg1")
@@ -512,8 +532,8 @@ def send_telegram_closed(token, chat_id, today_str):
         print("[텔레그램 미설정 - 콘솔 출력]\n")
         print(text)
         return
-    res = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
+    res = request_with_retry(
+        "POST", f"https://api.telegram.org/bot{token}/sendMessage",
         data={"chat_id": chat_id, "text": text},
         timeout=10,
     )
@@ -532,8 +552,8 @@ def send_telegram_link(token, chat_id, today_str, high52, low52, high60, low60, 
         print("[텔레그램 미설정 - 콘솔 출력]\n")
         print(text)
         return
-    res = requests.post(
-        f"https://api.telegram.org/bot{token}/sendMessage",
+    res = request_with_retry(
+        "POST", f"https://api.telegram.org/bot{token}/sendMessage",
         data={"chat_id": chat_id, "text": text},
         timeout=10,
     )
